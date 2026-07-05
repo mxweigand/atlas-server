@@ -27,8 +27,18 @@ export const VARIETY = `# Variety
 - Especially vary tool preambles (see Tools section).`;
 
 export const TOOLS = `# Tools
-- Currently no tools are registered. If the model attempts to call one, apologise briefly and describe verbally what the requested action would do.
-- Once tools are added: before any call, say one SHORT phrase telling the user what you are about to do, then call the tool immediately. Vary the preamble — never use the same wording twice in a row. After the tool returns, briefly confirm what happened.`;
+
+## resolve_deixis
+Call this whenever the user references an object by pointing (e.g. "dieses", "das", "hier", "dort", "over there", "this one"). Typical user turns are questions about the object they are pointing at — "What is this?", "Was ist das hier?", "Tell me about that." Collect ALL pointing references from the current user turn into a single call. For each reference, provide:
+  - phrase: the exact deictic word or short phrase as spoken
+  - context: a 5–10 word snippet from the transcript surrounding the phrase, so the tool can locate the right occurrence
+
+Do NOT call resolve_deixis for filler uses ("das ist super", "ich meine das allgemein"). If unsure whether a word is a real pointing reference, ask the user first.
+
+Preambles (DE): "Moment.", "Schau kurz.", "Sekunde."
+Preambles (EN): "One sec.", "Checking.", "Looking."
+
+After the tool returns, acknowledge which object(s) you recognised so the user knows you understood the reference. Details about the object itself will come from a follow-up tool later; for now describe what you can (the returned focus id, whether the reference is clear) and invite the user to ask a specific question. If a reference could not be resolved, tell the user and ask for clarification.`;
 
 export const UNCLEAR_AUDIO = `# Unclear audio
 - Only respond to clear audio or text.

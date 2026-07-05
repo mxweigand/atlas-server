@@ -30,6 +30,14 @@ export const configuration = () => ({
     logDir: process.env['INPUT_TRANSCRIPTION_LOG_DIR'] ?? 'logs',
     language: process.env['INPUT_TRANSCRIPTION_LANGUAGE'] ?? 'de',
   },
+  deixis: {
+    // Empirically measured end-to-end delay between the user speaking a word
+    // and its delta arriving at the server. Subtracted from the delta wallclock
+    // to estimate when the phrase was actually spoken.
+    pipelineLatencyMs: parseInt(process.env['DEIXIS_PIPELINE_LATENCY_MS'] ?? '1000', 10),
+    focusBufferMs: parseInt(process.env['DEIXIS_FOCUS_BUFFER_MS'] ?? '30000', 10),
+    deltaBufferMs: parseInt(process.env['DEIXIS_DELTA_BUFFER_MS'] ?? '30000', 10),
+  },
 });
 
 export type AppConfig = ReturnType<typeof configuration>;

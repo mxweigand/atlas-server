@@ -2,6 +2,8 @@ import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { TransportGateway, Topology } from '../transport/transport.gateway';
 import { RealtimeService } from '../openai/realtime.service';
 import { ToolsService } from '../tools/tools.service';
+import { DeixisService } from '../deixis/deixis.service';
+import { ResolveDeixisTool } from '../tools/deixis/resolve-deixis.tool';
 import { ServerMessage } from '../protocol';
 
 /**
@@ -25,13 +27,19 @@ export class BrokerService implements OnModuleInit {
   private assistantAudioChunks: Buffer[] = [];
   private recordingAssistantAudio = false;
 
+  /** Running index of deltas per itemId — used for LogService alignment on the client. */
+  private deltaIndexByItemId = new Map<string, number>();
+
   constructor(
     private readonly transport: TransportGateway,
     private readonly realtime: RealtimeService,
     private readonly tools: ToolsService,
+    private readonly deixis: DeixisService,
+    private readonly resolveDeixisTool: ResolveDeixisTool,
   ) {}
 
   async onModuleInit(): Promise<void> {
+    this.tools.register(this.resolveDeixisTool);
     this.realtime.setToolSchemas(this.tools.getActiveSchemas());
     this.wireEvents();
     await this.realtime.connect();
@@ -124,6 +132,9 @@ export class BrokerService implements OnModuleInit {
       const audioOffsetMs = this.userAudioStartWallclockMs
         ? wallclockMs - this.userAudioStartWallclockMs
         : 0;
+      const deltaIndex = this.deltaIndexByItemId.get(itemId) ?? 0;
+      this.deltaIndexByItemId.set(itemId, deltaIndex + 1);
+      this.deixis.recordDelta({ itemId, deltaIndex, wallclockMs, text: delta });
       this.transport.sendToMonitors({
         type: 'user_transcript_delta',
         itemId,
@@ -138,6 +149,15 @@ export class BrokerService implements OnModuleInit {
 
     // Topology changes -> notify monitors so their UI stays in sync
     this.transport.topologyChange$.subscribe((topology) => this.sendModeChanged(topology));
+
+    // Lens text frames — currently only focus_update. Record into the deixis
+    // service and rebroadcast to monitors for live visibility.
+    this.transport.lensMessage$.subscribe((msg) => {
+      if (msg.type !== 'focus_update') return;
+      const { wallclockMs, focusId } = msg;
+      this.deixis.recordFocus({ wallclockMs, focusId });
+      this.transport.sendToMonitors({ type: 'focus_update', wallclockMs, focusId });
+    });
   }
 
   private sendModeChanged(topology: Topology): void {
