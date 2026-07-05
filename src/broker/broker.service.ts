@@ -16,6 +16,12 @@ export class BrokerService implements OnModuleInit {
   private userAudioChunks: Buffer[] = [];
   private recordingUserAudio = false;
   private userAudioStartWallclockMs = 0;
+  /**
+   * Populated at speech_ended, drained at conversation.item.added. Holds the
+   * completed turn while we wait for OpenAI to hand us the item.id that keys
+   * every downstream event of this turn (transcript, deltas).
+   */
+  private pendingUserSpeech: { audio: string; audioStartWallclockMs: number } | null = null;
   private assistantAudioChunks: Buffer[] = [];
   private recordingAssistantAudio = false;
 
@@ -72,13 +78,24 @@ export class BrokerService implements OnModuleInit {
       this.recordingUserAudio = false;
       const audio = Buffer.concat(this.userAudioChunks).toString('base64');
       this.userAudioChunks = [];
-      this.transport.sendToMonitors({
-        type: 'user_speech',
-        audio,
-        audioStartWallclockMs: this.userAudioStartWallclockMs,
-      });
+      // Hold the clip until conversation.item.added arrives — we want to send
+      // user_speech with the itemId that all downstream events share.
+      this.pendingUserSpeech = { audio, audioStartWallclockMs: this.userAudioStartWallclockMs };
       this.transport.sendToLens({ type: 'speech_ended' });
       this.transport.sendToMonitors({ type: 'speech_ended' });
+    });
+
+    // Item materialised on the OpenAI side — flush the pending user_speech.
+    this.realtime.userItemAdded$.subscribe(({ itemId }) => {
+      const pending = this.pendingUserSpeech;
+      if (!pending) return;
+      this.pendingUserSpeech = null;
+      this.transport.sendToMonitors({
+        type: 'user_speech',
+        itemId,
+        audio: pending.audio,
+        audioStartWallclockMs: pending.audioStartWallclockMs,
+      });
     });
 
     // Response lifecycle with audio clip
@@ -100,8 +117,8 @@ export class BrokerService implements OnModuleInit {
     });
 
     // Transcripts -> monitor only
-    this.realtime.userTranscript$.subscribe((transcript) =>
-      this.transport.sendToMonitors({ type: 'user_transcript', transcript }),
+    this.realtime.userTranscript$.subscribe(({ itemId, transcript }) =>
+      this.transport.sendToMonitors({ type: 'user_transcript', itemId, transcript }),
     );
     this.realtime.userTranscriptDelta$.subscribe(({ itemId, delta, wallclockMs }) => {
       const audioOffsetMs = this.userAudioStartWallclockMs

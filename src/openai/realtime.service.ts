@@ -40,12 +40,17 @@ interface OutputItemDoneEvent {
 interface ErrorEvent { type: 'error'; error: { type: string; message: string } }
 interface InputAudioTranscriptionCompletedEvent {
   type: 'conversation.item.input_audio_transcription.completed';
+  item_id: string;
   transcript: string;
 }
 interface InputAudioTranscriptionDeltaEvent {
   type: 'conversation.item.input_audio_transcription.delta';
   item_id: string;
   delta: string;
+}
+interface ConversationItemAddedEvent {
+  type: 'conversation.item.added';
+  item: { id: string; type: string; role?: 'user' | 'assistant' | 'system' };
 }
 interface AudioTranscriptDoneEvent {
   type: 'response.audio_transcript.done';
@@ -58,6 +63,7 @@ type OpenAIEvent =
   | ErrorEvent
   | InputAudioTranscriptionCompletedEvent
   | InputAudioTranscriptionDeltaEvent
+  | ConversationItemAddedEvent
   | AudioTranscriptDoneEvent
   | { type: string };
 
@@ -82,7 +88,9 @@ export class RealtimeService implements OnModuleDestroy {
   readonly speechEnded$ = new Subject<void>();
   readonly responseStarted$ = new Subject<void>();
   readonly responseDone$ = new Subject<void>();
-  readonly userTranscript$ = new Subject<string>();
+  /** Fires when the OpenAI server materialises the conversation item for the just-ended user turn. */
+  readonly userItemAdded$ = new Subject<{ itemId: string }>();
+  readonly userTranscript$ = new Subject<{ itemId: string; transcript: string }>();
   readonly userTranscriptDelta$ = new Subject<{ itemId: string; delta: string; wallclockMs: number }>();
   readonly assistantTranscript$ = new Subject<string>();
 
@@ -230,9 +238,16 @@ export class RealtimeService implements OnModuleDestroy {
         this.logger.log('Response complete');
         this.responseDone$.next();
         break;
+      case 'conversation.item.added': {
+        const { item } = event as ConversationItemAddedEvent;
+        if (item?.type === 'message' && item.role === 'user' && item.id) {
+          this.userItemAdded$.next({ itemId: item.id });
+        }
+        break;
+      }
       case 'conversation.item.input_audio_transcription.completed': {
-        const { transcript } = event as InputAudioTranscriptionCompletedEvent;
-        if (transcript) this.userTranscript$.next(transcript);
+        const e = event as InputAudioTranscriptionCompletedEvent;
+        if (e.transcript) this.userTranscript$.next({ itemId: e.item_id, transcript: e.transcript });
         break;
       }
       case 'conversation.item.input_audio_transcription.delta': {
