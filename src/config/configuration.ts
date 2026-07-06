@@ -38,6 +38,12 @@ export const configuration = () => ({
     focusBufferMs: parseInt(process.env['DEIXIS_FOCUS_BUFFER_MS'] ?? '30000', 10),
     deltaBufferMs: parseInt(process.env['DEIXIS_DELTA_BUFFER_MS'] ?? '30000', 10),
   },
+  projects: {
+    // Directory containing one JSON file per project. Loaded on demand at
+    // activation. Manual edits between activations are picked up on the next
+    // activation call.
+    dataDir: process.env['PROJECTS_DATA_DIR'] ?? 'data/projects',
+  },
 });
 
 export type AppConfig = ReturnType<typeof configuration>;

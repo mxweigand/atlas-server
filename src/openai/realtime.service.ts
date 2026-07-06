@@ -100,6 +100,7 @@ export class RealtimeService implements OnModuleDestroy {
   private reconnectAttempts = 0;
   private transcriptionLogStream: WriteStream | null = null;
   private transcriptionLogPath: string | null = null;
+  private systemPromptProvider: () => string = () => buildSystemPrompt(null);
 
   constructor(private readonly config: ConfigService<AppConfig, true>) {
     this.initTranscriptionLogStream();
@@ -115,7 +116,21 @@ export class RealtimeService implements OnModuleDestroy {
     this.logger.log(`Tool schemas updated (${schemas.length} active)`);
   }
 
+  /**
+   * Provider evaluated on each connect/restart. Lets the broker inject the
+   * active project's overview into the system prompt without RealtimeService
+   * needing to know about projects.
+   */
+  setSystemPromptProvider(fn: () => string): void {
+    this.systemPromptProvider = fn;
+  }
+
+  get isConnected(): boolean {
+    return this.ws?.readyState === WebSocket.OPEN;
+  }
+
   async connect(): Promise<void> {
+    if (this.ws) return;
     this.stopping = false;
     this.reconnectAttempts = 0;
     await this.openConnection();
@@ -125,11 +140,30 @@ export class RealtimeService implements OnModuleDestroy {
     this.stopping = true;
     this.ws?.close();
     this.ws = null;
-    this.closeTranscriptionLogStream();
+  }
+
+  /**
+   * Tear down the current session and open a fresh one. Used when the active
+   * project changes: the system prompt has to be re-issued from scratch,
+   * which the GA API does not allow mid-session in a guaranteed way.
+   */
+  async restart(): Promise<void> {
+    if (this.ws) {
+      this.stopping = true;
+      this.ws.close();
+      this.ws = null;
+      // Small grace period so the close frame is on the wire before we
+      // reopen; avoids piling up parallel sockets.
+      await sleep(100);
+    }
+    this.stopping = false;
+    this.reconnectAttempts = 0;
+    await this.openConnection();
   }
 
   onModuleDestroy(): void {
     void this.disconnect();
+    this.closeTranscriptionLogStream();
   }
 
   sendAudio(pcm16: Buffer): void {
@@ -336,7 +370,7 @@ export class RealtimeService implements OnModuleDestroy {
     const sessionPayload: Record<string, unknown> = {
       type: 'realtime',
       output_modalities: ['audio'],
-      instructions: buildSystemPrompt(),
+      instructions: this.systemPromptProvider(),
       audio: {
         input: inputAudio,
         output: {

@@ -4,6 +4,10 @@ import { RealtimeService } from '../openai/realtime.service';
 import { ToolsService } from '../tools/tools.service';
 import { DeixisService } from '../deixis/deixis.service';
 import { ResolveDeixisTool } from '../tools/deixis/resolve-deixis.tool';
+import { GetObjectTool } from '../tools/objects/get-object.tool';
+import { UpdateObjectTool } from '../tools/objects/update-object.tool';
+import { ProjectsService } from '../projects/projects.service';
+import { buildSystemPrompt } from '../openai/systemPrompt';
 import { ServerMessage } from '../protocol';
 
 /**
@@ -35,15 +39,22 @@ export class BrokerService implements OnModuleInit {
     private readonly realtime: RealtimeService,
     private readonly tools: ToolsService,
     private readonly deixis: DeixisService,
+    private readonly projects: ProjectsService,
     private readonly resolveDeixisTool: ResolveDeixisTool,
+    private readonly getObjectTool: GetObjectTool,
+    private readonly updateObjectTool: UpdateObjectTool,
   ) {}
 
-  async onModuleInit(): Promise<void> {
+  onModuleInit(): void {
     this.tools.register(this.resolveDeixisTool);
+    this.tools.register(this.getObjectTool);
+    this.tools.register(this.updateObjectTool);
     this.realtime.setToolSchemas(this.tools.getActiveSchemas());
+    this.realtime.setSystemPromptProvider(() => buildSystemPrompt(this.projects.getActive()));
     this.wireEvents();
-    await this.realtime.connect();
-    this.logger.log('Broker ready');
+    // Realtime session only comes up once a project is activated. Idle server
+    // holds no OpenAI socket open.
+    this.logger.log('Broker ready — awaiting project activation');
   }
 
   private wireEvents(): void {
@@ -158,6 +169,33 @@ export class BrokerService implements OnModuleInit {
       this.deixis.recordFocus({ wallclockMs, focusId });
       this.transport.sendToMonitors({ type: 'focus_update', wallclockMs, focusId });
     });
+
+    // Project activation: broadcast to monitors + lens, then restart the
+    // realtime session so the fresh system prompt (with project overview)
+    // takes effect. Deactivation tears the session down entirely.
+    this.projects.activated$.subscribe((context) => {
+      const projectId = context?.project.id ?? null;
+      const event: ServerMessage = { type: 'project_activated', projectId };
+      this.transport.sendToLens(event);
+      this.transport.sendToMonitors(event);
+      void this.applyActiveProject(context !== null);
+    });
+
+    // Object patched (via tool or REST): keep monitors in sync.
+    this.projects.objectUpdated$.subscribe(({ projectId, object }) => {
+      this.transport.sendToMonitors({ type: 'object_updated', projectId, object });
+    });
+  }
+
+  private async applyActiveProject(active: boolean): Promise<void> {
+    try {
+      if (active) await this.realtime.restart();
+      else await this.realtime.disconnect();
+    } catch (err) {
+      this.logger.error(
+        `Failed to apply project change: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   private sendModeChanged(topology: Topology): void {
