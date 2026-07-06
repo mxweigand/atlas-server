@@ -12,8 +12,8 @@ import { ServerMessage } from '../protocol';
 
 /**
  * Wires OpenAI Realtime, tools, and transport together. HoloLens and debug
- * client hit the same handlers on /lens; the extra debug streams (user_speech
- * blob with deltas, transcripts) go to /monitor clients only.
+ * client hit the same handlers on /hololens; the extra debug streams
+ * (user_speech blob with deltas, transcripts) go to /monitor clients only.
  */
 @Injectable()
 export class BrokerService implements OnModuleInit {
@@ -58,19 +58,19 @@ export class BrokerService implements OnModuleInit {
   }
 
   private wireEvents(): void {
-    // Lens audio -> OpenAI (+ buffer during speech)
+    // HoloLens audio -> OpenAI (+ buffer during speech)
     this.transport.audioIn$.subscribe((pcm16) => {
       this.realtime.sendAudio(pcm16);
       if (this.recordingUserAudio) this.userAudioChunks.push(pcm16);
     });
 
-    // OpenAI audio -> lens client (+ buffer during response for monitor playback)
+    // OpenAI audio -> /hololens client (+ buffer during response for monitor playback)
     this.realtime.audio$.subscribe((chunk) => {
-      this.transport.sendAudioToLens(chunk);
+      this.transport.sendAudioToHololens(chunk);
       if (this.recordingAssistantAudio) this.assistantAudioChunks.push(chunk);
     });
 
-    // Tool calls -> announce on lens, execute, send result back
+    // Tool calls -> announce on /hololens, execute, send result back
     this.realtime.toolCall$.subscribe((call) => {
       const event: ServerMessage = {
         type: 'tool_call',
@@ -78,7 +78,7 @@ export class BrokerService implements OnModuleInit {
         name: call.name,
         args: call.arguments,
       };
-      this.transport.sendToLens(event);
+      this.transport.sendToHololens(event);
       this.transport.sendToMonitors(event);
       void this.executeToolCall(call.callId, call.name, call.arguments);
     });
@@ -90,7 +90,7 @@ export class BrokerService implements OnModuleInit {
       // Audio anchor: t=0 of the PCM blob attached to the next user_speech
       // event. The debug client uses this to align transcription deltas.
       this.userAudioStartWallclockMs = Date.now();
-      this.transport.sendToLens({ type: 'speech_started' });
+      this.transport.sendToHololens({ type: 'speech_started' });
       this.transport.sendToMonitors({ type: 'speech_started' });
     });
     this.realtime.speechEnded$.subscribe(() => {
@@ -100,7 +100,7 @@ export class BrokerService implements OnModuleInit {
       // Hold the clip until conversation.item.added arrives — we want to send
       // user_speech with the itemId that all downstream events share.
       this.pendingUserSpeech = { audio, audioStartWallclockMs: this.userAudioStartWallclockMs };
-      this.transport.sendToLens({ type: 'speech_ended' });
+      this.transport.sendToHololens({ type: 'speech_ended' });
       this.transport.sendToMonitors({ type: 'speech_ended' });
     });
 
@@ -121,7 +121,7 @@ export class BrokerService implements OnModuleInit {
     this.realtime.responseStarted$.subscribe(() => {
       this.assistantAudioChunks = [];
       this.recordingAssistantAudio = true;
-      this.transport.sendToLens({ type: 'response_started' });
+      this.transport.sendToHololens({ type: 'response_started' });
       this.transport.sendToMonitors({ type: 'response_started' });
     });
     this.realtime.responseDone$.subscribe(() => {
@@ -131,7 +131,7 @@ export class BrokerService implements OnModuleInit {
         this.transport.sendToMonitors({ type: 'assistant_speech', audio });
       }
       this.assistantAudioChunks = [];
-      this.transport.sendToLens({ type: 'response_done' });
+      this.transport.sendToHololens({ type: 'response_done' });
       this.transport.sendToMonitors({ type: 'response_done' });
     });
 
@@ -161,22 +161,22 @@ export class BrokerService implements OnModuleInit {
     // Topology changes -> notify monitors so their UI stays in sync
     this.transport.topologyChange$.subscribe((topology) => this.sendModeChanged(topology));
 
-    // Lens text frames — currently only focus_update. Record into the deixis
-    // service and rebroadcast to monitors for live visibility.
-    this.transport.lensMessage$.subscribe((msg) => {
+    // /hololens text frames — currently only focus_update. Record into the
+    // deixis service and rebroadcast to monitors for live visibility.
+    this.transport.hololensMessage$.subscribe((msg) => {
       if (msg.type !== 'focus_update') return;
       const { wallclockMs, focusId } = msg;
       this.deixis.recordFocus({ wallclockMs, focusId });
       this.transport.sendToMonitors({ type: 'focus_update', wallclockMs, focusId });
     });
 
-    // Project activation: broadcast to monitors + lens, then restart the
+    // Project activation: broadcast to monitors + /hololens, then restart the
     // realtime session so the fresh system prompt (with project overview)
     // takes effect. Deactivation tears the session down entirely.
     this.projects.activated$.subscribe((context) => {
       const projectId = context?.project.id ?? null;
       const event: ServerMessage = { type: 'project_activated', projectId };
-      this.transport.sendToLens(event);
+      this.transport.sendToHololens(event);
       this.transport.sendToMonitors(event);
       void this.applyActiveProject(context !== null);
     });
@@ -201,7 +201,7 @@ export class BrokerService implements OnModuleInit {
   private sendModeChanged(topology: Topology): void {
     this.transport.sendToMonitors({
       type: 'mode_changed',
-      lensClient: topology.lensClient,
+      hololensClient: topology.hololensClient,
       monitorClients: topology.monitorClients,
     });
   }
@@ -211,7 +211,7 @@ export class BrokerService implements OnModuleInit {
       const result = await this.tools.execute({ callId, name, arguments: args });
       this.realtime.sendToolResult(callId, result);
       const event: ServerMessage = { type: 'tool_result', callId, name, result };
-      this.transport.sendToLens(event);
+      this.transport.sendToHololens(event);
       this.transport.sendToMonitors(event);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -221,7 +221,7 @@ export class BrokerService implements OnModuleInit {
         type: 'error',
         message: `Tool "${name}" failed: ${message}`,
       };
-      this.transport.sendToLens(event);
+      this.transport.sendToHololens(event);
       this.transport.sendToMonitors(event);
     }
   }

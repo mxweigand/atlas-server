@@ -15,12 +15,12 @@ const WS_PORT = parseInt(process.env['WS_PORT'] ?? '8080', 10);
 
 /**
  * Two WS routes with clearly separated semantics:
- *  - /lens    : Input channel for the HoloLens or the debug client (as
- *               emulator). Single-client slot, first wins. Binary PCM in,
- *               assistant audio + lifecycle events out.
- *  - /monitor : Read-only debug view. Any number of clients. Receives
- *               server-pushed debug streams only (user_speech blob, deltas,
- *               transcripts, mode_changed).
+ *  - /hololens : Input channel for the HoloLens or the debug client (as
+ *                emulator). Single-client slot, first wins. Binary PCM in,
+ *                assistant audio + lifecycle events out.
+ *  - /monitor  : Read-only debug view. Any number of clients. Receives
+ *                server-pushed debug streams only (user_speech blob, deltas,
+ *                transcripts, mode_changed).
  */
 @WebSocketGateway(WS_PORT)
 export class TransportGateway implements OnGatewayConnection, OnGatewayDisconnect {
@@ -29,25 +29,25 @@ export class TransportGateway implements OnGatewayConnection, OnGatewayDisconnec
 
   private readonly logger = new Logger(TransportGateway.name);
 
-  /** Emits every incoming binary audio frame from the /lens slot. */
+  /** Emits every incoming binary audio frame from the /hololens slot. */
   readonly audioIn$ = new Subject<Buffer>();
 
-  /** Emits whenever the /lens slot or /monitor client set changes. */
+  /** Emits whenever the /hololens slot or /monitor client set changes. */
   readonly topologyChange$ = new Subject<Topology>();
 
-  /** Emits text-frame messages arriving on /lens (e.g. hello, later focus data). */
-  readonly lensMessage$ = new Subject<ClientMessage>();
+  /** Emits text-frame messages arriving on /hololens (e.g. hello, focus data). */
+  readonly hololensMessage$ = new Subject<ClientMessage>();
 
-  private lensClient: WebSocket | null = null;
-  private lensRole: 'hololens' | 'debug' | null = null;
+  private hololensClient: WebSocket | null = null;
+  private hololensRole: 'hololens' | 'debug' | null = null;
   private monitors = new Set<WebSocket>();
 
   handleConnection(client: WebSocket, req: IncomingMessage): void {
     const path = req.url?.split('?')[0] ?? '/';
     const address = req.socket?.remoteAddress ?? 'unknown';
 
-    if (path === '/lens') {
-      this.handleLensConnection(client, address);
+    if (path === '/hololens') {
+      this.handleHololensConnection(client, address);
       return;
     }
     if (path === '/monitor') {
@@ -55,14 +55,14 @@ export class TransportGateway implements OnGatewayConnection, OnGatewayDisconnec
       return;
     }
     this.logger.warn(`Rejected unknown path "${req.url}" from ${address}`);
-    client.close(1008, 'Unknown path — use /lens or /monitor');
+    client.close(1008, 'Unknown path — use /hololens or /monitor');
   }
 
   handleDisconnect(client: WebSocket): void {
-    if (this.lensClient === client) {
-      this.logger.log(`Lens client disconnected (${this.lensRole})`);
-      this.lensClient = null;
-      this.lensRole = null;
+    if (this.hololensClient === client) {
+      this.logger.log(`HoloLens client disconnected (${this.hololensRole})`);
+      this.hololensClient = null;
+      this.hololensRole = null;
       this.emitTopology();
       return;
     }
@@ -72,17 +72,17 @@ export class TransportGateway implements OnGatewayConnection, OnGatewayDisconnec
     }
   }
 
-  /** Send a JSON event to whoever is on /lens (usually the assistant response lifecycle). */
-  sendToLens(event: ServerMessage): void {
-    if (this.lensClient?.readyState === WebSocket.OPEN) {
-      this.lensClient.send(JSON.stringify(event));
+  /** Send a JSON event to whoever is on /hololens (usually the assistant response lifecycle). */
+  sendToHololens(event: ServerMessage): void {
+    if (this.hololensClient?.readyState === WebSocket.OPEN) {
+      this.hololensClient.send(JSON.stringify(event));
     }
   }
 
-  /** Send binary audio to whoever is on /lens (assistant TTS output). */
-  sendAudioToLens(pcm16: Buffer): void {
-    if (this.lensClient?.readyState === WebSocket.OPEN) {
-      this.lensClient.send(pcm16);
+  /** Send binary audio to whoever is on /hololens (assistant TTS output). */
+  sendAudioToHololens(pcm16: Buffer): void {
+    if (this.hololensClient?.readyState === WebSocket.OPEN) {
+      this.hololensClient.send(pcm16);
     }
   }
 
@@ -96,22 +96,22 @@ export class TransportGateway implements OnGatewayConnection, OnGatewayDisconnec
 
   /** Current topology snapshot (used by BrokerService for mode_changed events). */
   get topology(): Topology {
-    return { lensClient: this.lensRole, monitorClients: this.monitors.size };
+    return { hololensClient: this.hololensRole, monitorClients: this.monitors.size };
   }
 
-  private handleLensConnection(client: WebSocket, address: string): void {
-    if (this.lensClient) {
-      this.logger.warn(`Rejected second /lens connection from ${address} — slot already held by "${this.lensRole}"`);
-      client.close(1008, '/lens slot occupied');
+  private handleHololensConnection(client: WebSocket, address: string): void {
+    if (this.hololensClient) {
+      this.logger.warn(`Rejected second /hololens connection from ${address} — slot already held by "${this.hololensRole}"`);
+      client.close(1008, '/hololens slot occupied');
       return;
     }
 
     this.validateAuth(client, address);
-    this.lensClient = client;
+    this.hololensClient = client;
     // Default role until a `hello` frame overrides it. For a real HoloLens
     // we'll likely derive this from the auth header instead.
-    this.lensRole = 'debug';
-    this.logger.log(`Lens client connected from ${address} (role pending — default: debug)`);
+    this.hololensRole = 'debug';
+    this.logger.log(`HoloLens client connected from ${address} (role pending — default: debug)`);
 
     client.on('message', (data: WebSocket.RawData, isBinary: boolean) => {
       if (isBinary) {
@@ -122,13 +122,13 @@ export class TransportGateway implements OnGatewayConnection, OnGatewayDisconnec
       try {
         const msg = JSON.parse(data.toString()) as ClientMessage;
         if (msg.type === 'hello' && (msg.role === 'hololens' || msg.role === 'debug')) {
-          this.lensRole = msg.role;
-          this.logger.log(`Lens role updated: ${msg.role}`);
+          this.hololensRole = msg.role;
+          this.logger.log(`HoloLens role updated: ${msg.role}`);
           this.emitTopology();
         }
-        this.lensMessage$.next(msg);
+        this.hololensMessage$.next(msg);
       } catch {
-        this.logger.warn('Received malformed text frame on /lens');
+        this.logger.warn('Received malformed text frame on /hololens');
       }
     });
 
@@ -152,7 +152,7 @@ export class TransportGateway implements OnGatewayConnection, OnGatewayDisconnec
   private buildModeChanged(): ServerMessage {
     return {
       type: 'mode_changed',
-      lensClient: this.lensRole,
+      hololensClient: this.hololensRole,
       monitorClients: this.monitors.size,
     };
   }
@@ -164,6 +164,6 @@ export class TransportGateway implements OnGatewayConnection, OnGatewayDisconnec
 }
 
 export interface Topology {
-  lensClient: 'hololens' | 'debug' | null;
+  hololensClient: 'hololens' | 'debug' | null;
   monitorClients: number;
 }
