@@ -2,8 +2,9 @@ import { Injectable, Logger, NotFoundException, BadRequestException } from '@nes
 import { ConfigService } from '@nestjs/config';
 import { Subject } from 'rxjs';
 import { readdirSync, readFileSync, writeFileSync, renameSync, existsSync } from 'fs';
-import { resolve, isAbsolute, join } from 'path';
-import { AtlasObject, AtlasProject } from '../protocol/messages';
+import { resolve, isAbsolute, join, basename } from 'path';
+import { randomUUID } from 'crypto';
+import { AtlasGeometry, AtlasObject, AtlasProject } from '../protocol/messages';
 import { AppConfig } from '../config/configuration';
 
 export interface ProjectFileContents {
@@ -33,6 +34,10 @@ export class ProjectsService {
   readonly activated$ = new Subject<ProjectFileContents | null>();
   /** Fires when an object's mutable fields have been patched. */
   readonly objectUpdated$ = new Subject<{ projectId: string; object: AtlasObject }>();
+  /** Fires when a new object is created. */
+  readonly objectCreated$ = new Subject<{ projectId: string; object: AtlasObject }>();
+  /** Fires when an object is deleted. */
+  readonly objectDeleted$ = new Subject<{ projectId: string; objectId: string }>();
 
   constructor(private readonly config: ConfigService<AppConfig, true>) {
     const raw = this.config.get('projects.dataDir', { infer: true }) as string;
@@ -78,10 +83,43 @@ export class ProjectsService {
     this.activated$.next(null);
   }
 
+  createObject(projectId: string, geometry: AtlasGeometry | null): AtlasObject {
+    const contents = this.get(projectId);
+    const newObj: AtlasObject = {
+      id: randomUUID(),
+      name: '',
+      summary: '',
+      content: '',
+      geometry: geometry ?? null,
+    };
+    contents.objects.push(newObj);
+    this.writeFile(projectId, contents);
+    if (this.active?.project.id === projectId) {
+      this.active.objects.push(newObj);
+    }
+    this.objectCreated$.next({ projectId, object: newObj });
+    return newObj;
+  }
+
+  deleteObject(projectId: string, objectId: string): void {
+    const contents = this.get(projectId);
+    const idx = contents.objects.findIndex((o) => o.id === objectId);
+    if (idx < 0) {
+      throw new NotFoundException(`Object "${objectId}" not found in project "${projectId}"`);
+    }
+    contents.objects.splice(idx, 1);
+    this.writeFile(projectId, contents);
+    if (this.active?.project.id === projectId) {
+      const activeIdx = this.active.objects.findIndex((o) => o.id === objectId);
+      if (activeIdx >= 0) this.active.objects.splice(activeIdx, 1);
+    }
+    this.objectDeleted$.next({ projectId, objectId });
+  }
+
   updateObject(
     projectId: string,
     objectId: string,
-    patch: Partial<Pick<AtlasObject, 'name' | 'summary' | 'content'>>,
+    patch: Partial<Pick<AtlasObject, 'name' | 'summary' | 'content' | 'geometry'>>,
   ): AtlasObject {
     const contents = this.get(projectId);
     const idx = contents.objects.findIndex((o) => o.id === objectId);
@@ -94,6 +132,7 @@ export class ProjectsService {
       ...(patch.name !== undefined ? { name: patch.name } : {}),
       ...(patch.summary !== undefined ? { summary: patch.summary } : {}),
       ...(patch.content !== undefined ? { content: patch.content } : {}),
+      ...(patch.geometry !== undefined ? { geometry: patch.geometry } : {}),
     };
     contents.objects[idx] = next;
     this.writeFile(projectId, contents);
@@ -118,16 +157,23 @@ export class ProjectsService {
     }
     const raw = readFileSync(path, 'utf-8');
     const parsed = JSON.parse(raw) as ProjectFileContents;
-    if (!parsed.project?.id || !Array.isArray(parsed.objects)) {
+    if (!parsed.project || !Array.isArray(parsed.objects)) {
       throw new BadRequestException(`Malformed project file: ${path}`);
     }
+    // The filename (without .json) is the single source of the project id.
+    parsed.project.id = basename(path, '.json');
     return parsed;
   }
 
   private writeFile(projectId: string, contents: ProjectFileContents): void {
     const path = this.pathFor(projectId);
     const tmp = `${path}.tmp`;
-    writeFileSync(tmp, JSON.stringify(contents, null, 2), 'utf-8');
+    // Do not persist the id — it is derived from the filename.
+    const onDisk = {
+      project: { name: contents.project.name, summary: contents.project.summary },
+      objects: contents.objects,
+    };
+    writeFileSync(tmp, JSON.stringify(onDisk, null, 2), 'utf-8');
     renameSync(tmp, path);
   }
 }

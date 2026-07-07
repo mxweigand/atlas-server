@@ -8,7 +8,7 @@ import { GetObjectTool } from '../tools/objects/get-object.tool';
 import { UpdateObjectTool } from '../tools/objects/update-object.tool';
 import { ProjectsService } from '../projects/projects.service';
 import { buildSystemPrompt } from '../openai/systemPrompt';
-import { ServerMessage } from '../protocol';
+import { ServerMessage, ObjectCreatedMessage, ObjectDeletedMessage } from '../protocol';
 
 /**
  * Wires OpenAI Realtime, tools, and transport together. HoloLens and debug
@@ -181,9 +181,22 @@ export class BrokerService implements OnModuleInit {
       void this.applyActiveProject(context !== null);
     });
 
-    // Object patched (via tool or REST): keep monitors in sync.
+    // Object patched (via tool or REST): keep hololens + monitors in sync.
     this.projects.objectUpdated$.subscribe(({ projectId, object }) => {
+      this.transport.sendToHololens({ type: 'object_updated', projectId, object });
       this.transport.sendToMonitors({ type: 'object_updated', projectId, object });
+    });
+
+    // Object created/deleted via REST: broadcast to hololens + monitors.
+    this.projects.objectCreated$.subscribe(({ projectId, object }) => {
+      const event: ServerMessage = { type: 'object_created', projectId, object } as ObjectCreatedMessage;
+      this.transport.sendToHololens(event);
+      this.transport.sendToMonitors(event);
+    });
+    this.projects.objectDeleted$.subscribe(({ projectId, objectId }) => {
+      const event: ServerMessage = { type: 'object_deleted', projectId, objectId } as ObjectDeletedMessage;
+      this.transport.sendToHololens(event);
+      this.transport.sendToMonitors(event);
     });
   }
 
