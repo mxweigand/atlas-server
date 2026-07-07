@@ -1,4 +1,5 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { TransportGateway, Topology } from '../transport/transport.gateway';
 import { RealtimeService } from '../openai/realtime.service';
 import { ToolsService } from '../tools/tools.service';
@@ -9,6 +10,7 @@ import { UpdateObjectTool } from '../tools/objects/update-object.tool';
 import { ProjectsService } from '../projects/projects.service';
 import { buildSystemPrompt } from '../openai/systemPrompt';
 import { ServerMessage, ObjectCreatedMessage, ObjectDeletedMessage } from '../protocol';
+import { AppConfig } from '../config/configuration';
 
 /**
  * Wires OpenAI Realtime, tools, and transport together. HoloLens and debug
@@ -31,6 +33,20 @@ export class BrokerService implements OnModuleInit {
   private assistantAudioChunks: Buffer[] = [];
   private recordingAssistantAudio = false;
 
+  /**
+   * Rolling last-N-ms mic buffer. Filled continuously as long as the mic is
+   * live, drained (as prefix) when speech_started fires so the VAD-cut prefix
+   * of a turn ends up in the user_speech clip.
+   */
+  private lookbackChunks: { buf: Buffer; wallclockMs: number }[] = [];
+  private readonly lookbackMs: number;
+  /**
+   * End-to-end wire delay between a word being spoken and its transcript delta
+   * arriving. Drives both the delta highlight offset (spokenOffsetMs) and the
+   * playback trim (how much of the lookback prefix the client skips).
+   */
+  private readonly pipelineLatencyMs: number;
+
   /** Running index of deltas per itemId — used for LogService alignment on the client. */
   private deltaIndexByItemId = new Map<string, number>();
 
@@ -43,7 +59,11 @@ export class BrokerService implements OnModuleInit {
     private readonly resolveDeixisTool: ResolveDeixisTool,
     private readonly getObjectTool: GetObjectTool,
     private readonly updateObjectTool: UpdateObjectTool,
-  ) {}
+    config: ConfigService<AppConfig, true>,
+  ) {
+    this.lookbackMs = config.get('audio.lookbackMs', { infer: true }) as number;
+    this.pipelineLatencyMs = config.get('deixis.pipelineLatencyMs', { infer: true }) as number;
+  }
 
   onModuleInit(): void {
     this.tools.register(this.resolveDeixisTool);
@@ -58,8 +78,14 @@ export class BrokerService implements OnModuleInit {
   }
 
   private wireEvents(): void {
-    // HoloLens audio -> OpenAI (+ buffer during speech)
+    // HoloLens audio -> OpenAI (+ buffer during speech, + rolling lookback)
     this.transport.audioIn$.subscribe((pcm16) => {
+      const now = Date.now();
+      this.lookbackChunks.push({ buf: pcm16, wallclockMs: now });
+      const cutoff = now - this.lookbackMs;
+      while (this.lookbackChunks.length && this.lookbackChunks[0].wallclockMs < cutoff) {
+        this.lookbackChunks.shift();
+      }
       this.realtime.sendAudio(pcm16);
       if (this.recordingUserAudio) this.userAudioChunks.push(pcm16);
     });
@@ -85,11 +111,13 @@ export class BrokerService implements OnModuleInit {
 
     // Speech lifecycle with audio clip
     this.realtime.speechStarted$.subscribe(() => {
-      this.userAudioChunks = [];
+      // Prepend the rolling lookback so the VAD-cut prefix ends up in the
+      // clip. Anchor moves back to the oldest lookback sample so audioOffsetMs
+      // for subsequent deltas still measures from the true audio start.
+      const prefix = this.lookbackChunks.map((c) => c.buf);
+      this.userAudioChunks = prefix;
       this.recordingUserAudio = true;
-      // Audio anchor: t=0 of the PCM blob attached to the next user_speech
-      // event. The debug client uses this to align transcription deltas.
-      this.userAudioStartWallclockMs = Date.now();
+      this.userAudioStartWallclockMs = this.lookbackChunks[0]?.wallclockMs ?? Date.now();
       this.transport.sendToHololens({ type: 'speech_started' });
       this.transport.sendToMonitors({ type: 'speech_started' });
     });
@@ -114,6 +142,7 @@ export class BrokerService implements OnModuleInit {
         itemId,
         audio: pending.audio,
         audioStartWallclockMs: pending.audioStartWallclockMs,
+        playbackTrimMs: this.pipelineLatencyMs,
       });
     });
 
@@ -143,6 +172,7 @@ export class BrokerService implements OnModuleInit {
       const audioOffsetMs = this.userAudioStartWallclockMs
         ? wallclockMs - this.userAudioStartWallclockMs
         : 0;
+      const spokenOffsetMs = Math.max(0, audioOffsetMs - this.pipelineLatencyMs);
       const deltaIndex = this.deltaIndexByItemId.get(itemId) ?? 0;
       this.deltaIndexByItemId.set(itemId, deltaIndex + 1);
       this.deixis.recordDelta({ itemId, deltaIndex, wallclockMs, text: delta });
@@ -152,6 +182,7 @@ export class BrokerService implements OnModuleInit {
         delta,
         wallclockMs,
         audioOffsetMs,
+        spokenOffsetMs,
       });
     });
     this.realtime.assistantTranscript$.subscribe((transcript) =>

@@ -32,7 +32,11 @@ export interface OpenAIToolSchema {
 
 // Minimal typing for the OpenAI Realtime server events we handle
 interface SessionCreatedEvent { type: 'session.created'; session: { id: string } }
-interface AudioDeltaEvent { type: 'response.audio.delta'; delta: string }
+/**
+ * Assistant audio delta chunk. GA (`response.output_audio.delta`) and legacy
+ * (`response.audio.delta`) event names carry the same payload — we accept both.
+ */
+interface AudioDeltaEvent { type: 'response.audio.delta' | 'response.output_audio.delta'; delta: string }
 interface OutputItemDoneEvent {
   type: 'response.output_item.done';
   item: { type: string; call_id: string; name: string; arguments: string };
@@ -53,7 +57,7 @@ interface ConversationItemAddedEvent {
   item: { id: string; type: string; role?: 'user' | 'assistant' | 'system' };
 }
 interface AudioTranscriptDoneEvent {
-  type: 'response.audio_transcript.done';
+  type: 'response.audio_transcript.done' | 'response.output_audio_transcript.done';
   transcript: string;
 }
 type OpenAIEvent =
@@ -241,7 +245,8 @@ export class RealtimeService implements OnModuleDestroy {
 
   private dispatch(event: OpenAIEvent): void {
     switch (event.type) {
-      case 'response.audio.delta': {
+      case 'response.audio.delta':
+      case 'response.output_audio.delta': {
         const { delta } = event as AudioDeltaEvent;
         if (delta) this.audio$.next(Buffer.from(delta, 'base64'));
         break;
@@ -295,7 +300,8 @@ export class RealtimeService implements OnModuleDestroy {
         }
         break;
       }
-      case 'response.audio_transcript.done': {
+      case 'response.audio_transcript.done':
+      case 'response.output_audio_transcript.done': {
         const { transcript } = event as AudioTranscriptDoneEvent;
         if (transcript) this.assistantTranscript$.next(transcript);
         break;

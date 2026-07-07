@@ -38,6 +38,11 @@ export const configuration = () => ({
     focusBufferMs: parseInt(process.env['DEIXIS_FOCUS_BUFFER_MS'] ?? '30000', 10),
     deltaBufferMs: parseInt(process.env['DEIXIS_DELTA_BUFFER_MS'] ?? '30000', 10),
   },
+  audio: {
+    // Rolling mic buffer kept ahead of speech_started so the VAD-cut prefix
+    // ("W" in "Was ist das?") can be prepended to the user_speech clip.
+    lookbackMs: parseInt(process.env['AUDIO_LOOKBACK_MS'] ?? '1500', 10),
+  },
   projects: {
     // Directory containing one JSON file per project. Loaded on demand at
     // activation. Manual edits between activations are picked up on the next
