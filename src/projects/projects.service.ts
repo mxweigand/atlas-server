@@ -3,7 +3,6 @@ import { ConfigService } from '@nestjs/config';
 import { Subject } from 'rxjs';
 import { readdirSync, readFileSync, writeFileSync, renameSync, existsSync } from 'fs';
 import { resolve, isAbsolute, join, basename } from 'path';
-import { randomUUID } from 'crypto';
 import { AtlasGeometry, AtlasObject, AtlasProject } from '../protocol/messages';
 import { AppConfig } from '../config/configuration';
 
@@ -86,7 +85,7 @@ export class ProjectsService {
   createObject(projectId: string, geometry: AtlasGeometry | null): AtlasObject {
     const contents = this.get(projectId);
     const newObj: AtlasObject = {
-      id: randomUUID(),
+      id: nextObjectId(contents.objects),
       name: '',
       summary: '',
       content: '',
@@ -176,4 +175,15 @@ export class ProjectsService {
     writeFileSync(tmp, JSON.stringify(onDisk, null, 2), 'utf-8');
     renameSync(tmp, path);
   }
+}
+
+/**
+ * Smallest positive integer (as a string) not yet used by any object in the
+ * project. Kept short and human-readable.
+ */
+function nextObjectId(existing: AtlasObject[]): string {
+  const used = new Set(existing.map((o) => o.id));
+  let n = 1;
+  while (used.has(String(n))) n++;
+  return String(n);
 }
