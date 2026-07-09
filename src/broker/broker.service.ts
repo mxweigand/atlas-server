@@ -7,6 +7,7 @@ import { DeixisService } from '../deixis/deixis.service';
 import { ResolveDeixisTool } from '../tools/deixis/resolve-deixis.tool';
 import { GetObjectTool } from '../tools/objects/get-object.tool';
 import { UpdateObjectTool } from '../tools/objects/update-object.tool';
+import { WaitForUserTool } from '../tools/silence/wait-for-user.tool';
 import { ProjectsService } from '../projects/projects.service';
 import { buildSystemPrompt } from '../openai/systemPrompt';
 import { ServerMessage, ObjectCreatedMessage, ObjectDeletedMessage } from '../protocol';
@@ -59,6 +60,7 @@ export class BrokerService implements OnModuleInit {
     private readonly resolveDeixisTool: ResolveDeixisTool,
     private readonly getObjectTool: GetObjectTool,
     private readonly updateObjectTool: UpdateObjectTool,
+    private readonly waitForUserTool: WaitForUserTool,
     config: ConfigService<AppConfig, true>,
   ) {
     this.lookbackMs = config.get('audio.lookbackMs', { infer: true }) as number;
@@ -69,6 +71,7 @@ export class BrokerService implements OnModuleInit {
     this.tools.register(this.resolveDeixisTool);
     this.tools.register(this.getObjectTool);
     this.tools.register(this.updateObjectTool);
+    this.tools.register(this.waitForUserTool);
     this.realtime.setToolSchemas(this.tools.getActiveSchemas());
     this.realtime.setSystemPromptProvider(() => buildSystemPrompt(this.projects.getActive()));
     this.wireEvents();
@@ -192,13 +195,42 @@ export class BrokerService implements OnModuleInit {
     // Topology changes -> notify monitors so their UI stays in sync
     this.transport.topologyChange$.subscribe((topology) => this.sendModeChanged(topology));
 
+    // Late-joining monitor: hand it the current active-project snapshot so its
+    // UI shows what's running instead of "idle" until the next activation. This
+    // event is the only channel for active-project state — there is no REST
+    // endpoint that reports it.
+    this.transport.monitorConnected$.subscribe((client) => {
+      const active = this.projects.getActive();
+      this.transport.sendToMonitor(client, {
+        type: 'project_activated',
+        projectId: active?.project.id ?? null,
+      });
+    });
+
     // /hololens text frames — currently only focus_update. Record into the
     // deixis service and rebroadcast to monitors for live visibility.
     this.transport.hololensMessage$.subscribe((msg) => {
       if (msg.type !== 'focus_update') return;
-      const { wallclockMs, focusId } = msg;
-      this.deixis.recordFocus({ wallclockMs, focusId });
-      this.transport.sendToMonitors({ type: 'focus_update', wallclockMs, focusId });
+      // Stamp with the server's receive time, NOT the client's wallclock. The
+      // transcript-delta timeline is on the server clock too, and a real
+      // HoloLens has its own (skewed) clock — comparing the two directly is
+      // what broke deixis on-device. The debug client runs on the same machine
+      // as the server, so its clock already matched, which is why it "just
+      // worked". focus_update network latency is small and constant, so the
+      // server-receive time is the correct common reference for both.
+      const wallclockMs = Date.now();
+      this.deixis.recordFocus({ wallclockMs, focusId: msg.focusId });
+      this.transport.sendToMonitors({ type: 'focus_update', wallclockMs, focusId: msg.focusId });
+    });
+
+    // HoloLens gone (hard close / crash / network drop): tear the active project
+    // down so the next start is a true cold start and no OpenAI Realtime session
+    // is left running. Idempotent — no-op when nothing is active (e.g. the client
+    // already left cleanly via REST deactivate before closing the socket).
+    this.transport.hololensDisconnected$.subscribe(() => {
+      if (!this.projects.getActive()) return;
+      this.logger.log('HoloLens disconnected — deactivating active project');
+      this.projects.deactivate();
     });
 
     // Project activation: broadcast to monitors + /hololens, then restart the

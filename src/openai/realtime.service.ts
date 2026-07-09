@@ -365,6 +365,10 @@ export class RealtimeService implements OnModuleDestroy {
     const inputAudio: Record<string, unknown> = {
       format: { type: 'audio/pcm', rate: 24000 },
       turn_detection: turnDetection,
+      // OpenAI-side noise suppression — noticeably helpful with noisy/
+      // weak microphone audio (e.g. HoloLens). 'near_field' for head-/
+      // body-close microphones, 'far_field' for more distant ones. Test if needed.
+      noise_reduction: { type: 'far_field' },
     };
     if (transcriptionCfg.enabled) {
       inputAudio.transcription = {

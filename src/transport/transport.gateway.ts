@@ -38,6 +38,21 @@ export class TransportGateway implements OnGatewayConnection, OnGatewayDisconnec
   /** Emits text-frame messages arriving on /hololens (e.g. hello, focus data). */
   readonly hololensMessage$ = new Subject<ClientMessage>();
 
+  /**
+   * Fires when the /hololens slot is vacated by a disconnect (hard app close,
+   * crash, network drop). The reliable "HoloLens is gone" signal — unlike the
+   * REST deactivate call, it also covers non-clean exits, so downstream can
+   * tear the active project (and its OpenAI session) down.
+   */
+  readonly hololensDisconnected$ = new Subject<void>();
+
+  /**
+   * Fires with the socket of each newly connected /monitor client, right after
+   * its initial mode snapshot, so late joiners can be handed current domain
+   * state (e.g. which project is active) instead of waiting for the next change.
+   */
+  readonly monitorConnected$ = new Subject<WebSocket>();
+
   private hololensClient: WebSocket | null = null;
   private hololensRole: 'hololens' | 'debug' | null = null;
   private monitors = new Set<WebSocket>();
@@ -63,6 +78,7 @@ export class TransportGateway implements OnGatewayConnection, OnGatewayDisconnec
       this.logger.log(`HoloLens client disconnected (${this.hololensRole})`);
       this.hololensClient = null;
       this.hololensRole = null;
+      this.hololensDisconnected$.next();
       this.emitTopology();
       return;
     }
@@ -92,6 +108,11 @@ export class TransportGateway implements OnGatewayConnection, OnGatewayDisconnec
     for (const ws of this.monitors) {
       if (ws.readyState === WebSocket.OPEN) ws.send(payload);
     }
+  }
+
+  /** Send a JSON event to a single /monitor client (used for join snapshots). */
+  sendToMonitor(client: WebSocket, event: ServerMessage): void {
+    if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify(event));
   }
 
   /** Current topology snapshot (used by BrokerService for mode_changed events). */
@@ -142,6 +163,7 @@ export class TransportGateway implements OnGatewayConnection, OnGatewayDisconnec
     // Send a topology snapshot immediately so the UI reflects the current
     // state without waiting for the next change event.
     client.send(JSON.stringify(this.buildModeChanged()));
+    this.monitorConnected$.next(client);
     this.emitTopology();
   }
 
