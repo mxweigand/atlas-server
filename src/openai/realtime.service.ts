@@ -346,12 +346,15 @@ export class RealtimeService implements OnModuleDestroy {
     // Semantic VAD evaluates whether an utterance is *semantically* complete,
     // not just whether silence has elapsed. silence_duration_ms is unused when
     // semantic_vad is active. Server VAD is available via VAD_TYPE=server_vad.
+    // interrupt_response is off: the HoloLens mic has no AEC, so the
+    // assistant's own speaker output can bleed back into its own input and
+    // falsely trigger a self-interrupt. Safer to let responses finish.
     const turnDetection = vad.type === 'semantic_vad'
       ? {
           type: 'semantic_vad',
           eagerness: vad.eagerness,
           create_response: true,
-          interrupt_response: true,
+          interrupt_response: false,
         }
       : {
           type: 'server_vad',
@@ -359,7 +362,7 @@ export class RealtimeService implements OnModuleDestroy {
           threshold: vad.threshold,
           prefix_padding_ms: vad.prefixPaddingMs,
           create_response: true,
-          interrupt_response: true,
+          interrupt_response: false,
         };
 
     const inputAudio: Record<string, unknown> = {

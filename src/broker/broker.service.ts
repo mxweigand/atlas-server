@@ -265,8 +265,12 @@ export class BrokerService implements OnModuleInit {
 
   private async applyActiveProject(active: boolean): Promise<void> {
     try {
-      if (active) await this.realtime.restart();
-      else await this.realtime.disconnect();
+      if (active) {
+        this.realtime.setToolSchemas(this.tools.getActiveSchemas(this.projects.getActiveMode()));
+        await this.realtime.restart();
+      } else {
+        await this.realtime.disconnect();
+      }
     } catch (err) {
       this.logger.error(
         `Failed to apply project change: ${err instanceof Error ? err.message : String(err)}`,

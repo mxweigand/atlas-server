@@ -28,6 +28,7 @@ export class ProjectsService {
   private readonly dataDir: string;
 
   private active: ProjectFileContents | null = null;
+  private activeMode: 'view' | 'edit' | null = null;
 
   /** Fires on every activation change. Payload is null when deactivated. */
   readonly activated$ = new Subject<ProjectFileContents | null>();
@@ -67,10 +68,15 @@ export class ProjectsService {
     return this.active;
   }
 
-  activate(projectId: string): ProjectFileContents {
+  getActiveMode(): 'view' | 'edit' | null {
+    return this.activeMode;
+  }
+
+  activate(projectId: string, mode: 'view' | 'edit'): ProjectFileContents {
     const contents = this.get(projectId);
     this.active = contents;
-    this.logger.log(`Activated project "${projectId}"`);
+    this.activeMode = mode;
+    this.logger.log(`Activated project "${projectId}" (mode=${mode})`);
     this.activated$.next(contents);
     return contents;
   }
@@ -79,6 +85,7 @@ export class ProjectsService {
     if (!this.active) return;
     this.logger.log(`Deactivated project "${this.active.project.id}"`);
     this.active = null;
+    this.activeMode = null;
     this.activated$.next(null);
   }
 

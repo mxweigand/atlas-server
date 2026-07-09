@@ -3,9 +3,8 @@ import { Tool } from './tool.interface';
 import { OpenAIToolSchema, ToolCall } from '../openai/realtime.service';
 
 /**
- * Registry for tools the voice agent can invoke. Empty for now — later this is
- * where deixis resolution, object manipulation, etc. will be registered. The
- * BrokerService queries `getActiveSchemas()` on every session init.
+ * Registry for tools the voice agent can invoke. The BrokerService queries
+ * `getActiveSchemas()` once at boot and again on every project activation.
  */
 @Injectable()
 export class ToolsService {
@@ -20,13 +19,16 @@ export class ToolsService {
     this.logger.log(`Registered tool: ${tool.name}`);
   }
 
-  getActiveSchemas(): OpenAIToolSchema[] {
-    return [...this.tools.values()].map((t) => ({
-      type: 'function',
-      name: t.name,
-      description: t.description,
-      parameters: t.parameters,
-    }));
+  getActiveSchemas(mode: 'view' | 'edit' | null = null): OpenAIToolSchema[] {
+    return [...this.tools.values()]
+      // update_object edits object descriptions — not allowed in view mode.
+      .filter((t) => !(mode === 'view' && t.name === 'update_object'))
+      .map((t) => ({
+        type: 'function',
+        name: t.name,
+        description: t.description,
+        parameters: t.parameters,
+      }));
   }
 
   async execute(call: ToolCall): Promise<unknown> {

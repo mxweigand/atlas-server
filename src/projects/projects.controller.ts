@@ -7,6 +7,10 @@ interface CreateObjectDto {
   geometry?: AtlasGeometry;
 }
 
+interface ActivateDto {
+  mode?: 'view' | 'edit';
+}
+
 interface UpdateObjectDto {
   name?: string;
   summary?: string;
@@ -34,8 +38,11 @@ export class ProjectsController {
   }
 
   @Post(':id/activate')
-  activate(@Param('id') id: string): ProjectFileContents {
-    return this.projects.activate(id);
+  activate(@Param('id') id: string, @Body() dto: ActivateDto): ProjectFileContents {
+    // Missing or invalid mode defaults to 'view' — no old/unpatched
+    // Unity should accidentally get access to the mutating update_object tool.
+    const mode: 'view' | 'edit' = dto?.mode === 'edit' ? 'edit' : 'view';
+    return this.projects.activate(id, mode);
   }
 
   @Post('deactivate')
