@@ -37,6 +37,16 @@ export const configuration = () => ({
     pipelineLatencyMs: parseInt(process.env['DEIXIS_PIPELINE_LATENCY_MS'] ?? '1000', 10),
     focusBufferMs: parseInt(process.env['DEIXIS_FOCUS_BUFFER_MS'] ?? '30000', 10),
     deltaBufferMs: parseInt(process.env['DEIXIS_DELTA_BUFFER_MS'] ?? '30000', 10),
+    // Half-width of the window around the estimated speak time in which a focus
+    // change makes the resolution ambiguous: if the pointed-at object switches
+    // this close to spokenAtMs, a small latency-calibration error could flip the
+    // result. Sized to the ~100ms measured spread of the calibrated latency.
+    ambiguityWindowMs: parseInt(process.env['DEIXIS_AMBIGUITY_WINDOW_MS'] ?? '200', 10),
+    // Maximum age of the most recent focus sample at or before spokenAtMs. If the
+    // newest prior sample is older than this (or only a forward-tolerance fallback
+    // sample exists) the pointing stream had a reporting gap. Sized above the
+    // 250ms client heartbeat so a single missed heartbeat is still tolerated.
+    staleThresholdMs: parseInt(process.env['DEIXIS_STALE_THRESHOLD_MS'] ?? '500', 10),
   },
   audio: {
     // Rolling mic buffer kept ahead of speech_started so the VAD-cut prefix

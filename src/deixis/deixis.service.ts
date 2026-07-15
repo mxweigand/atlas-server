@@ -57,12 +57,16 @@ export class DeixisService {
   private readonly pipelineLatencyMs: number;
   private readonly focusBufferMs: number;
   private readonly deltaBufferMs: number;
+  private readonly ambiguityWindowMs: number;
+  private readonly staleThresholdMs: number;
 
   constructor(config: ConfigService<AppConfig, true>) {
     const cfg = config.get('deixis', { infer: true }) as AppConfig['deixis'];
     this.pipelineLatencyMs = cfg.pipelineLatencyMs;
     this.focusBufferMs = cfg.focusBufferMs;
     this.deltaBufferMs = cfg.deltaBufferMs;
+    this.ambiguityWindowMs = cfg.ambiguityWindowMs;
+    this.staleThresholdMs = cfg.staleThresholdMs;
   }
 
   recordFocus(sample: FocusSample): void {
@@ -155,9 +159,13 @@ export class DeixisService {
 
     const spokenAtMs = hitDelta.wallclockMs - this.pipelineLatencyMs;
     const focusSample = this.focusAt(spokenAtMs);
-    const focusDelta = focusSample ? Math.abs(focusSample.wallclockMs - spokenAtMs) : Infinity;
 
-    const confidence = deriveConfidence(match.contextExact, focusDelta);
+    // Two independent quality checks scored alongside the contextExact gate:
+    // does the focus id churn right around the estimated speak time (ambiguous),
+    // and is there a fresh focus sample at/before it (gap)?
+    const ambiguous = this.focusChangesNear(spokenAtMs);
+    const gap = !this.hasRecentFocus(spokenAtMs);
+    const confidence = deriveConfidence(match.contextExact, focusSample !== null, ambiguous, gap);
 
     return {
       phrase: ref.phrase,
@@ -176,13 +184,8 @@ export class DeixisService {
    * nearest sample in a small forward tolerance window.
    */
   private focusAt(t: number): FocusSample | null {
-    let best: FocusSample | null = null;
-    for (const s of this.focusBuffer) {
-      if (s.wallclockMs <= t) {
-        if (!best || s.wallclockMs > best.wallclockMs) best = s;
-      }
-    }
-    if (best) return best;
+    const backward = this.newestFocusAtOrBefore(t);
+    if (backward) return backward;
     // Fallback: nearest sample within 500ms forward window.
     const tolerance = 500;
     let nearest: { s: FocusSample; d: number } | null = null;
@@ -191,6 +194,50 @@ export class DeixisService {
       if (d <= tolerance && (!nearest || d < nearest.d)) nearest = { s, d };
     }
     return nearest?.s ?? null;
+  }
+
+  /** Newest focus sample at or before t, ignoring the forward fallback. */
+  private newestFocusAtOrBefore(t: number): FocusSample | null {
+    let best: FocusSample | null = null;
+    for (const s of this.focusBuffer) {
+      if (s.wallclockMs <= t && (!best || s.wallclockMs > best.wallclockMs)) best = s;
+    }
+    return best;
+  }
+
+  /**
+   * Ambiguity check: true if the active focus id changes anywhere within
+   * `spokenAtMs ± ambiguityWindowMs`. Changes are detected between neighbouring
+   * samples (transitions to/from `null` included) and count when either sample
+   * of the transition falls inside the window, so a switch on either side of
+   * the estimated speak time is caught — that is exactly the case where a small
+   * latency error would flip the result to the other object.
+   */
+  private focusChangesNear(spokenAtMs: number): boolean {
+    const lo = spokenAtMs - this.ambiguityWindowMs;
+    const hi = spokenAtMs + this.ambiguityWindowMs;
+    const sorted = [...this.focusBuffer].sort((a, b) => a.wallclockMs - b.wallclockMs);
+    for (let i = 1; i < sorted.length; i++) {
+      const prev = sorted[i - 1];
+      const cur = sorted[i];
+      if (prev.focusId === cur.focusId) continue;
+      const prevIn = prev.wallclockMs >= lo && prev.wallclockMs <= hi;
+      const curIn = cur.wallclockMs >= lo && cur.wallclockMs <= hi;
+      if (prevIn || curIn) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Gap check: true if there is a focus sample at or before spokenAtMs whose age
+   * is within `staleThresholdMs`. False when the newest prior sample is stale or
+   * when the only usable sample came from the forward-tolerance fallback (i.e.
+   * lies after spokenAtMs) — both mean the pointing stream had a reporting gap.
+   */
+  private hasRecentFocus(spokenAtMs: number): boolean {
+    const backward = this.newestFocusAtOrBefore(spokenAtMs);
+    if (!backward) return false;
+    return spokenAtMs - backward.wallclockMs <= this.staleThresholdMs;
   }
 
   private pruneByAge<T extends { wallclockMs: number }>(
@@ -218,8 +265,22 @@ function groupByItem(deltas: DeltaSample[]): Map<string, DeltaSample[]> {
   return byItem;
 }
 
-function deriveConfidence(contextExact: boolean, focusDeltaMs: number): 'high' | 'medium' | 'low' {
-  if (contextExact && focusDeltaMs <= 150) return 'high';
-  if (contextExact && focusDeltaMs <= 500) return 'medium';
+/**
+ * contextExact and available focus data are hard gates. Above them the score is
+ * driven by two independent checks — `ambiguous` (a focus change near the speak
+ * time) and `gap` (no fresh focus sample at/before it): neither failing → high,
+ * exactly one failing → medium, otherwise (no context match, no focus data, or
+ * both checks failing) → low.
+ */
+function deriveConfidence(
+  contextExact: boolean,
+  hasFocus: boolean,
+  ambiguous: boolean,
+  gap: boolean,
+): 'high' | 'medium' | 'low' {
+  if (!contextExact || !hasFocus) return 'low';
+  const failures = (ambiguous ? 1 : 0) + (gap ? 1 : 0);
+  if (failures === 0) return 'high';
+  if (failures === 1) return 'medium';
   return 'low';
 }
